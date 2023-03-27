@@ -3,11 +3,13 @@ use lazy_static::lazy_static;
 use map_macro::set;
 use ndarray::{arr1, arr2, Array1};
 use regex::Regex;
+use rusty_ulid::generate_ulid_string;
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
 };
 
+#[derive(Debug)]
 pub struct Atom {
     element: Element,
     formal_charge: i8,
@@ -29,7 +31,8 @@ impl Atom {
     }
 }
 
-pub enum ParseError {
+#[derive(Debug)]
+pub enum MoleculeError {
     CantAnalyzeLine(String),
     CantAnalyzeToken(String),
     UnknownElement(String),
@@ -38,11 +41,11 @@ pub enum ParseError {
 }
 
 impl FromStr for Atom {
-    type Err = ParseError;
+    type Err = MoleculeError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         lazy_static! {
             static ref RE: Regex = Regex::new(
-                r"(?P<isotope>\d+)?(?P<element>[A-z]([a-z])?)(?P<formal_charge>(+|-)\d+)"
+                r"(?P<isotope>\d+)?(?P<element>[A-z]([a-z])?)(?P<formal_charge>(\+|-)\d+)?"
             )
             .unwrap();
         }
@@ -53,7 +56,7 @@ impl FromStr for Atom {
                 .expect("Always get an element group.")
                 .as_str();
             let element = Element::from_str(element)
-                .map_err(|_| ParseError::UnknownElement(s.to_string()))?;
+                .map_err(|_| MoleculeError::UnknownElement(s.to_string()))?;
             let formal_charge: i8 = if let Some(formal_charge) = captured.name("formal_charge") {
                 formal_charge
                     .as_str()
@@ -74,7 +77,7 @@ impl FromStr for Atom {
                 formal_charge,
             })
         } else {
-            Err(ParseError::CantAnalyzeToken(s.to_string()))
+            Err(MoleculeError::CantAnalyzeToken(s.to_string()))
         }
     }
 }
@@ -82,30 +85,40 @@ impl FromStr for Atom {
 pub type SelectedGroups = HashMap<String, HashSet<usize>>;
 
 type DescartesMoleItem = (Atom, Array1<f64>, HashSet<String>, String);
+#[derive(Debug)]
 pub struct DescartesMole {
     atoms: Vec<DescartesMoleItem>,
 }
 
 impl FromStr for DescartesMole {
-    type Err = ParseError;
+    type Err = MoleculeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Split input file as lines
         let lines = if s.contains("\r\n") {
             s.split("\r\n")
         } else {
             s.split("\n")
         }
         .filter(|line| *line != "");
-        let mut atoms = vec![];
-        for (idx, line) in lines.enumerate() {
+
+        // Generate molecule struct.-
+        let mut mole = DescartesMole { atoms: vec![] };
+
+        for line in lines {
+            // Split each line into components
             let components = line
                 .split(" ")
                 .filter(|component| *component != "")
                 .collect::<Vec<_>>();
+
+            // Generate atom.
             let atom = components
                 .get(0)
                 .map(|atom_token| Atom::from_str(*atom_token))
-                .unwrap_or(Err(ParseError::CantAnalyzeLine(line.to_string())))?;
+                .unwrap_or(Err(MoleculeError::CantAnalyzeLine(line.to_string())))?;
+
+            // Parse coordinate information
             macro_rules! parse_position {
                 ($token_idx: expr) => {{
                     components
@@ -113,47 +126,58 @@ impl FromStr for DescartesMole {
                         .map(|token| {
                             token
                                 .parse::<f64>()
-                                .map_err(|_| ParseError::InvalidPosition($token_idx.to_string()))
+                                .map_err(|_| MoleculeError::InvalidPosition($token_idx.to_string()))
                         })
-                        .unwrap_or(Err(ParseError::InvalidPosition(line.to_string())))
+                        .unwrap_or(Err(MoleculeError::InvalidPosition(line.to_string())))
                 }};
             }
             let x = parse_position!(1)?;
             let y = parse_position!(2)?;
             let z = parse_position!(3)?;
+            let position = arr1(&[x, y, z]);
+
+            // Parse addtional attributes and uid of atom, add to molecule.
             lazy_static! {
-                static ref UID_RE: Regex = Regex::new(r"@([A-Z,a-z])([A-Z,a-z,0-9,_])*").unwrap();
+                static ref UID_RE: Regex = Regex::new(r"@.+").unwrap();
             }
-            let (uid, groups) = if components.len() > 4 {
-                let (uid, groups) = if UID_RE.is_match(components[4]) {
-                    if components.len() > 5 {
-                        let groups = &components[5..]
+            let _added = if let Some(addition_attrs) = components.get(4..) {
+                if addition_attrs.get(0).map_or(false, |s| UID_RE.is_match(s)) {
+                    mole.add_atom(
+                        atom,
+                        position,
+                        addition_attrs
+                            .get(1..)
+                            .unwrap_or(&[])
                             .iter()
                             .map(|s| s.to_string())
-                            .collect::<HashSet<String>>();
-                        (components[4].to_string(), groups.clone())
-                    } else {
-                        (components[4].to_string(), HashSet::<String>::new())
-                    }
+                            .collect(),
+                        Some(addition_attrs[0].to_string()),
+                    )?
                 } else {
-                    let groups = &components[4..]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect::<HashSet<String>>();
-                    (format!("@{}", idx + 1), groups.clone())
-                };
-                (uid, groups)
+                    mole.add_atom(
+                        atom,
+                        position,
+                        addition_attrs.iter().map(|s| s.to_string()).collect(),
+                        None,
+                    )?
+                }
             } else {
-                let groups = HashSet::<String>::new();
-                (format!("@{}", idx + 1), groups.clone())
+                mole.add_atom(atom, position, HashSet::new(), None)?
             };
-            atoms.push((atom, arr1(&[x, y, z]), groups, uid))
         }
-        Ok(DescartesMole { atoms })
+        Ok(mole)
     }
 }
 
 impl DescartesMole {
+    pub fn get_uids(&self) -> HashSet<&str> {
+        let mut uids = HashSet::new();
+        for (_, _, _, uid) in &self.atoms {
+            uids.insert(uid.as_str());
+        }
+        uids
+    }
+
     pub fn select(&mut self, group_name: &str, index: usize) -> Option<bool> {
         let (_, _, groups, _) = self.atoms.get_mut(index)?;
         Some(groups.insert(group_name.to_string()))
@@ -162,6 +186,36 @@ impl DescartesMole {
     pub fn unselect(&mut self, group_name: &str, index: usize) -> Option<bool> {
         let (_, _, groups, _) = self.atoms.get_mut(index)?;
         Some(groups.remove(group_name))
+    }
+
+    pub fn get_atom(&self, uid: &str) -> Option<&DescartesMoleItem> {
+        self.atoms
+            .iter()
+            .find(|(_, _, _, atom_uid)| atom_uid == uid)
+    }
+
+    pub fn get_atom_mut(&mut self, uid: &str) -> Option<&mut DescartesMoleItem> {
+        self.atoms
+            .iter_mut()
+            .find(|(_, _, _, atom_uid)| atom_uid == uid)
+    }
+
+    pub fn add_atom(
+        &mut self,
+        atom: Atom,
+        position: Array1<f64>,
+        groups: HashSet<String>,
+        uid: Option<String>,
+    ) -> Result<&DescartesMoleItem, MoleculeError> {
+        let uid = uid.unwrap_or(generate_ulid_string());
+        if self.get_uids().contains(uid.as_str()) {
+            Err(MoleculeError::DuplicatedUniqId(uid))
+        } else {
+            self.atoms.push((atom, position, groups, uid.clone()));
+            Ok(self
+                .get_atom(uid.as_str())
+                .expect("Atom with given uid should be added."))
+        }
     }
 
     pub fn get_groups(&self) -> HashSet<String> {
@@ -268,22 +322,18 @@ impl DescartesMole {
     }
 }
 
-// fn replace(target: &mut DescartesMole, polymer: DescartesMole, target_prefix: &str, polymer_src: &str, polymer_dst: &str) {
-//     let to_replace = target.get_groups();
-//     let to_replace = to_replace.iter().filter(|group_name| group_name.starts_with(target_prefix)).collect::<HashSet<_>>();
-//     for replace_target in to_replace {
-//         let target_src_group_name = replace_target.split(":").collect::<Vec<_>>()[1];
-//         let (_, target_src_position, _) = target.get_group(target_src_group_name)[0];
-//         let target_dsts = target.get_group(&replace_target);
-//         for (_, target_dst_position, _) in target_dsts {
-//             let bond_vector = target_src_position - target_dst_position;
-
-//         }
-//     }
-// }
-
 #[test]
 fn overflow_slice() {
     let arr: Vec<usize> = vec![];
+    // let result = arr.get(4..);
     println!("{:?}", &arr[4..])
+}
+
+#[test]
+fn read_and_parse() {
+    use std::fs;
+    let file = fs::read("./test.rsm").unwrap();
+    let file = String::from_utf8(file).unwrap();
+    let mole = DescartesMole::from_str(&file).unwrap();
+    println!("{:?}", mole);
 }

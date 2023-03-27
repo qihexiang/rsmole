@@ -1,6 +1,6 @@
 use strum_macros::EnumString;
 
-#[derive(EnumString, Clone, Copy, PartialEq, Eq)]
+#[derive(EnumString, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Element {
     H = 1,
     He,
