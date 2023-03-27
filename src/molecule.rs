@@ -1,12 +1,12 @@
 use crate::elements::Element;
 use lazy_static::lazy_static;
 use map_macro::set;
-use ndarray::{arr1, arr2, Array1};
+use nalgebra::{Matrix3, Vector3};
 use regex::Regex;
 use rusty_ulid::generate_ulid_string;
 use std::{
     collections::{HashMap, HashSet},
-    str::FromStr,
+    str::FromStr
 };
 
 #[derive(Debug)]
@@ -84,7 +84,7 @@ impl FromStr for Atom {
 
 pub type SelectedGroups = HashMap<String, HashSet<usize>>;
 
-type DescartesMoleItem = (Atom, Array1<f64>, HashSet<String>, String);
+type DescartesMoleItem = (Atom, Vector3<f64>, HashSet<String>, String);
 #[derive(Debug)]
 pub struct DescartesMole {
     atoms: Vec<DescartesMoleItem>,
@@ -134,7 +134,7 @@ impl FromStr for DescartesMole {
             let x = parse_position!(1)?;
             let y = parse_position!(2)?;
             let z = parse_position!(3)?;
-            let position = arr1(&[x, y, z]);
+            let position = Vector3::new(x, y, z);
 
             // Parse addtional attributes and uid of atom, add to molecule.
             lazy_static! {
@@ -203,7 +203,7 @@ impl DescartesMole {
     pub fn add_atom(
         &mut self,
         atom: Atom,
-        position: Array1<f64>,
+        position: Vector3<f64>,
         groups: HashSet<String>,
         uid: Option<String>,
     ) -> Result<&DescartesMoleItem, MoleculeError> {
@@ -250,7 +250,7 @@ impl DescartesMole {
     pub fn move_atoms(
         &mut self,
         group_name: &str,
-        move_vector: Array1<f64>,
+        move_vector: Vector3<f64>,
     ) -> Vec<&DescartesMoleItem> {
         let atoms = self.get_group_mut(group_name);
         for (_, position, _, _) in atoms {
@@ -262,32 +262,26 @@ impl DescartesMole {
     pub fn rotate_atoms(
         &mut self,
         group_name: &str,
-        axis: Array1<f64>,
+        axis: Vector3<f64>,
         radian: f64,
     ) -> Vec<&DescartesMoleItem> {
         let atoms = self.get_group_mut(group_name);
         let (x, y, z) = (axis[0], axis[1], axis[2]);
         let cos = radian.cos();
         let sin = radian.sin();
-        let rotate_matrix = arr2(&[
-            [
+        let rotate_matrix = Matrix3::new(
                 cos + (1. - cos) * x.powf(2.),
                 (1. - cos) * x * y - sin * z,
                 (1. - cos) * x * z + sin * y,
-            ],
-            [
                 (1. - cos) * x * y + sin * z,
                 cos + (1. - cos) * y.powf(2.),
                 (1. - cos) * y * z - sin * x,
-            ],
-            [
                 (1. - cos) * x * z - sin * y,
                 (1. - cos) * y * z + sin * x,
-                cos + (1. - cos) * z.powf(2.),
-            ],
-        ]);
+                cos + (1. - cos) * z.powf(2.)
+            );
         for (_, position, _, _) in atoms {
-            *position = position.dot(&rotate_matrix);
+            *position = position.tr_mul(&rotate_matrix).transpose();
         }
         self.get_group(group_name)
     }
@@ -324,9 +318,13 @@ impl DescartesMole {
 
 #[test]
 fn overflow_slice() {
-    let arr: Vec<usize> = vec![];
-    // let result = arr.get(4..);
-    println!("{:?}", &arr[4..])
+    let vec = Vector3::new(1,2,3);
+    let mat = Matrix3::new(
+        1, 2, 3,
+        1, 2, 3,
+        1, 2, 3
+    );
+    println!("{}", vec.tr_mul(&mat))
 }
 
 #[test]
